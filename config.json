@@ -1,0 +1,75 @@
+{
+  "top_n": 100,
+  "extra_coins": [
+    "TONUSDT"
+  ],
+  "exclude": [],
+  "timeframes": [
+    "15m",
+    "30m",
+    "1h",
+    "4h",
+    "1d"
+  ],
+  "lookback": {
+    "15m": 3,
+    "30m": 2,
+    "1h": 2,
+    "4h": 2,
+    "1d": 2
+  },
+  "tz": "Africa/Cairo",
+  "signals": {
+    "golden_death": true,
+    "ema_9_21": true,
+    "ma200": true,
+    "macd": true,
+    "divergence": true,
+    "patterns": true,
+    "flags": true,
+    "trendlines": true
+  },
+  "signals_off_tf": {
+    "15m": [
+      "patterns"
+    ],
+    "30m": [
+      "patterns"
+    ]
+  },
+  "min_confluence": {
+    "15m": 2,
+    "30m": 2,
+    "1h": 1,
+    "4h": 1,
+    "1d": 1
+  },
+  "cooldown_candles": 8,
+  "max_messages_per_run": 40,
+  "ma200_confirm_closes": 2,
+  "macd_min_strength": 0.5,
+  "macd_strong": 1.0,
+  "alert_rsi_ma_cross": false,
+  "pivot_window": 5,
+  "trend_tol_atr": 0.3,
+  "trend_min_touches": 4,
+  "trend_min_span": 50,
+  "trend_confirm_closes": 2,
+  "ma_type": "EMA",
+  "adx_min": 20,
+  "breakout_confirm": "tag",
+  "breakout_vol_ratio": 1.2,
+  "htf_filter": {
+    "15m": "30m",
+    "30m": "1h",
+    "1h": "4h",
+    "4h": "1d"
+  },
+  "candles": 600,
+  "htf_rule": "ema200",
+  "htf_exempt": [
+    "div_bull",
+    "div_bear"
+  ],
+  "htf_mode": "tag"
+}
