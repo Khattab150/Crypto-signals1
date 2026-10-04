@@ -2,7 +2,7 @@
 """بوت إشارات تليجرام - يفحص شموع Binance المقفولة ويبعت تنبيهات حسب طريقة التحليل في config.json
 تشغيل:  python bot.py            (عادي)     python bot.py --dry   (يطبع بدل ما يبعت)     python bot.py --test  (رسالة تجربة)
 """
-import json, os, sys, time
+import html, json, os, re, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from itertools import combinations
@@ -26,7 +26,8 @@ CFG = {
     'trend_tol_atr': 0.3, 'trend_min_touches': 4, 'trend_min_span': 50,
     'cooldown_candles': 8, 'min_confluence': {'15m': 2, '30m': 2, '1h': 1, '4h': 1, '1d': 1},
     'trend_confirm_closes': 2, 'trend_buffer_atr': 0.1,
-    'signals': {k: True for k in ['golden_death', 'ema_9_21', 'ma200', 'macd', 'divergence', 'patterns', 'flags', 'trendlines']},
+    'signals': {k: True for k in ['golden_death', 'ema_9_21', 'ma200', 'macd', 'divergence', 'patterns', 'flags', 'trendlines', 'bollinger', 'obv', 'sr_breaks']},
+    'market_context': True, 'context_tfs': ['1h', '4h', '1d'],
 }
 _p = os.path.join(HERE, 'config.json')
 if os.path.exists(_p):
@@ -118,6 +119,14 @@ def prep(x):
     x['sig'] = ema(x['macd'], 9)
     x['atr'] = atr(x['h'], x['l'], c)
     x['ph'], x['pl'] = pivots(x['h'], x['l'], CFG['pivot_window'])
+    n20 = sma(c, 20); x['bbU'], x['bbL'], x['bbw'] = [], [], []
+    for i, m in enumerate(n20):
+        if m is None: x['bbU'].append(None); x['bbL'].append(None); x['bbw'].append(None); continue
+        sd = (sum((v-m)**2 for v in c[i-19:i+1])/20)**.5
+        x['bbU'].append(m+2*sd); x['bbL'].append(m-2*sd); x['bbw'].append(4*sd/m*100)
+    ob = [0.0]
+    for i in range(1, len(c)): ob.append(ob[-1] + (x['v'][i] if c[i] > c[i-1] else -x['v'][i] if c[i] < c[i-1] else 0))
+    x['obv'] = ob; x['vma'] = sma(x['v'], 20)
     return x
 def light(x):
     c = x['c']; mf = ema if MT == 'EMA' else sma
@@ -134,7 +143,7 @@ def trend_dir(x, j):
     if a is None or b is None: return a if b is None else b
     return a if a == b else 0
 def htf_ok(tr, sid, d):
-    return tr is None or sid in CFG['htf_exempt'] or (tr != 0 and (d == 'bull') == (tr > 0))
+    return tr is None or d == 'neutral' or sid in CFG['htf_exempt'] or (tr != 0 and (d == 'bull') == (tr > 0))
 def choppy(x, i): return CFG['adx_min'] > 0 and x['adx'][i] is not None and x['adx'][i] < CFG['adx_min']
 def cu(a, b, i): return None not in (a[i], b[i], a[i-1], b[i-1]) and a[i-1] <= b[i-1] and a[i] > b[i]
 def cd(a, b, i): return None not in (a[i], b[i], a[i-1], b[i-1]) and a[i-1] >= b[i-1] and a[i] < b[i]
@@ -142,22 +151,22 @@ def cd(a, b, i): return None not in (a[i], b[i], a[i-1], b[i-1]) and a[i-1] >= b
 # ---------------- كاشفات الإشارات ----------------
 def sig_ma(x, i):
     o = []
-    if cu(x['m50'], x['m200'], i): o.append(('golden', 'bull', f'تقاطع ذهبي (Golden Cross): {MT} 50 اخترق {MT} 200 لأعلى'))
-    if cd(x['m50'], x['m200'], i): o.append(('death', 'bear', f'تقاطع الموت (Death Cross): {MT} 50 كسر {MT} 200 لأسفل'))
+    if cu(x['m50'], x['m200'], i): o.append(('golden', 'bull', f'تقاطع ذهبي||{MT} 50 اخترق {MT} 200 لأعلى'))
+    if cd(x['m50'], x['m200'], i): o.append(('death', 'bear', f'تقاطع الموت||{MT} 50 كسر {MT} 200 لأسفل'))
     return o
 def sig_ema(x, i):
     o = []
     if choppy(x, i): return o
-    if cu(x['e9'], x['e21'], i): o.append(('e921u', 'bull', 'EMA 9 اخترق EMA 21 لأعلى'))
-    if cd(x['e9'], x['e21'], i): o.append(('e921d', 'bear', 'EMA 9 كسر EMA 21 لأسفل'))
+    if cu(x['e9'], x['e21'], i): o.append(('e921u', 'bull', 'تقاطع EMA صاعد||EMA 9 اخترق EMA 21 لأعلى'))
+    if cd(x['e9'], x['e21'], i): o.append(('e921d', 'bear', 'تقاطع EMA هابط||EMA 9 كسر EMA 21 لأسفل'))
     return o
 def sig_200(x, i):
     n, c, s = CFG['ma200_confirm_closes'], x['c'], x['m200']
     if i-n < 0 or None in s[i-n:i+1]: return []
     if all(c[i-k] > s[i-k] for k in range(n)) and c[i-n] <= s[i-n]:
-        return [('c200u', 'bull', f'{n} إغلاقات متتالية فوق {MT} 200 (بعد ما كان تحته)')]
+        return [('c200u', 'bull', f'إغلاقات فوق {MT} 200||{n} إغلاقات متتالية فوقه بعد ما كان تحته')]
     if all(c[i-k] < s[i-k] for k in range(n)) and c[i-n] >= s[i-n]:
-        return [('c200d', 'bear', f'{n} إغلاقات متتالية تحت {MT} 200 (بعد ما كان فوقه)')]
+        return [('c200d', 'bear', f'إغلاقات تحت {MT} 200||{n} إغلاقات متتالية تحته بعد ما كان فوقه')]
     return []
 def sig_macd(x, i):
     m, s = x['macd'], x['sig']
@@ -167,13 +176,13 @@ def sig_macd(x, i):
     st = abs(m[i]) / (sum(win)/len(win)) if win and sum(win) > 0 else 0
     if st < CFG['macd_min_strength']: return []
     tag = 'قوي (بعيد عن الصفر)' if st >= CFG['macd_strong'] else 'متوسط'
-    if cu(m, s, i) and m[i] < 0: return [('macd_up', 'bull', f'MACD قطع خط الإشارة لأعلى تحت الصفر ← إشارة صعود · القوة: {tag}')]
-    if cd(m, s, i) and m[i] > 0: return [('macd_dn', 'bear', f'MACD قطع خط الإشارة لأسفل فوق الصفر ← إشارة نزول · القوة: {tag}')]
+    if cu(m, s, i) and m[i] < 0: return [('macd_up', 'bull', f'MACD تحت الصفر: إشارة صعود||قطع خط الإشارة لأعلى · القوة: {tag}')]
+    if cd(m, s, i) and m[i] > 0: return [('macd_dn', 'bear', f'MACD فوق الصفر: إشارة نزول||قطع خط الإشارة لأسفل · القوة: {tag}')]
     return []
 def sig_rsima(x, i):
     if not CFG['alert_rsi_ma_cross'] or choppy(x, i): return []
-    if cu(x['rsi'], x['rsima'], i): return [('rsima_u', 'bull', 'RSI اخترق متوسطه (14) لأعلى')]
-    if cd(x['rsi'], x['rsima'], i): return [('rsima_d', 'bear', 'RSI كسر متوسطه (14) لأسفل')]
+    if cu(x['rsi'], x['rsima'], i): return [('rsima_u', 'bull', 'RSI يخترق متوسطه||RSI اخترق متوسطه 14 لأعلى')]
+    if cd(x['rsi'], x['rsima'], i): return [('rsima_d', 'bear', 'RSI يكسر متوسطه||RSI كسر متوسطه 14 لأسفل')]
     return []
 def sig_div(x, i):
     w, r, o = CFG['pivot_window'], x['rsi'], []
@@ -186,9 +195,9 @@ def sig_div(x, i):
         a = prev[-1]; y = x[key]
         if r[a] is None or r[b] is None: continue
         if kind == 'bull' and y[b] < y[a] and r[b] > r[a]+1 and r[a] <= 50:
-            o.append(('div_bull', 'bull', f'دايفيرجن إيجابي: سعر قاع أدنى و RSI قاع أعلى ({r[a]:.0f}→{r[b]:.0f}) · اتأكد بعد {w} شموع'))
+            o.append(('div_bull', 'bull', f'دايفيرجن إيجابي (RSI)||السعر عمل قاع أدنى وRSI عمل قاع أعلى: {r[a]:.0f} ← {r[b]:.0f} · بيتأكد بعد {w} شموع'))
         if kind == 'bear' and y[b] > y[a] and r[b] < r[a]-1 and r[a] >= 50:
-            o.append(('div_bear', 'bear', f'دايفيرجن سلبي: سعر قمة أعلى و RSI قمة أدنى ({r[a]:.0f}→{r[b]:.0f}) · اتأكد بعد {w} شموع'))
+            o.append(('div_bear', 'bear', f'دايفيرجن سلبي (RSI)||السعر عمل قمة أعلى وRSI عمل قمة أدنى: {r[a]:.0f} ← {r[b]:.0f} · بيتأكد بعد {w} شموع'))
     return o
 def sig_pat(x, i):
     o_, h, l, c, v, a = x['o'], x['h'], x['l'], x['c'], x['v'], x['atr']
@@ -203,15 +212,15 @@ def sig_pat(x, i):
     ab = sum(bd(j) for j in range(i-14, i))/14
     out = []
     if bull and dn and c[i-1] < o_[i-1] and o_[i] <= c[i-1] and c[i] >= o_[i-1] and bd(i) > bd(i-1):
-        out.append(('p_beng', 'bull', 'شمعة ابتلاع شرائية (Bullish Engulfing) بعد هبوط'))
+        out.append(('p_beng', 'bull', 'ابتلاع شرائي||شمعة ابتلاع بعد هبوط'))
     if bear and up and c[i-1] > o_[i-1] and o_[i] >= c[i-1] and c[i] <= o_[i-1] and bd(i) > bd(i-1):
-        out.append(('p_seng', 'bear', 'شمعة ابتلاع بيعية (Bearish Engulfing) بعد صعود'))
-    if dn and lw >= 0.6*rg(i) and uw <= 0.2*rg(i): out.append(('p_ham', 'bull', 'شمعة مطرقة (Hammer) بعد هبوط'))
-    if up and uw >= 0.6*rg(i) and lw <= 0.2*rg(i): out.append(('p_star', 'bear', 'شمعة الشهاب (Shooting Star) بعد صعود'))
+        out.append(('p_seng', 'bear', 'ابتلاع بيعي||شمعة ابتلاع بعد صعود'))
+    if dn and lw >= 0.6*rg(i) and uw <= 0.2*rg(i): out.append(('p_ham', 'bull', 'مطرقة||شمعة مطرقة بعد هبوط'))
+    if up and uw >= 0.6*rg(i) and lw <= 0.2*rg(i): out.append(('p_star', 'bear', 'شهاب||شمعة شهاب بعد صعود'))
     if bull and c[i-2] < o_[i-2] and bd(i-2) >= 0.6*ab and bd(i-1) <= 0.3*bd(i-2) and c[i] > (o_[i-2]+c[i-2])/2 and c[i-2] < c[i-7]:
-        out.append(('p_morn', 'bull', 'نموذج نجمة الصباح (Morning Star)'))
+        out.append(('p_morn', 'bull', 'نجمة الصباح||نموذج انعكاسي صاعد من 3 شموع'))
     if bear and c[i-2] > o_[i-2] and bd(i-2) >= 0.6*ab and bd(i-1) <= 0.3*bd(i-2) and c[i] < (o_[i-2]+c[i-2])/2 and c[i-2] > c[i-7]:
-        out.append(('p_eve', 'bear', 'نموذج نجمة المساء (Evening Star)'))
+        out.append(('p_eve', 'bear', 'نجمة المساء||نموذج انعكاسي هابط من 3 شموع'))
     return out
 def sig_flag(x, i):
     c, h, l, a, P = x['c'], x['h'], x['l'], x['atr'], CFG['flag_pole_len']
@@ -224,11 +233,11 @@ def sig_flag(x, i):
         lo = min(pole_l); up_pole = top-lo
         if up_pole >= CFG['flag_pole_atr']*A and pole_l.index(lo) < pole_h.index(max(pole_h)) and max(pole_h)-top <= 0.5*A \
            and top-fl <= 0.5*up_pole and fh-fl <= 0.5*up_pole and slope <= 0.05*A and c[i] > fh and c[i-1] <= fh:
-            return [('flag_bull', 'bull', f'اختراق بولش فلاج (Bull Flag): سطح الفلاج {fh:.6g} · طول الفلاج {F} شمعة')]
+            return [('flag_bull', 'bull', f'اختراق بولش فلاج||سطح الفلاج {fh:.6g} · طول الفلاج {F} شمعة')]
         hi = max(pole_h); dn_pole = hi-bot
         if dn_pole >= CFG['flag_pole_atr']*A and pole_h.index(hi) < pole_l.index(min(pole_l)) and bot-min(pole_l) <= 0.5*A \
            and fh-bot <= 0.5*dn_pole and fh-fl <= 0.5*dn_pole and slope >= -0.05*A and c[i] < fl and c[i-1] >= fl:
-            return [('flag_bear', 'bear', f'كسر بيرش فلاج (Bear Flag): سطح الفلاج {fl:.6g} · طول الفلاج {F} شمعة')]
+            return [('flag_bear', 'bear', f'كسر بيرش فلاج||سطح الفلاج {fl:.6g} · طول الفلاج {F} شمعة')]
     return []
 def sig_trend(x, i):
     a_i = x['atr'][i]
@@ -250,24 +259,59 @@ def sig_trend(x, i):
             else: brk = all(c[i-k] < ln(i-k)-buf for k in range(N)) and c[i-N] >= ln(i-N)-tol
             if brk and (best is None or (touches, span) > best[:2]): best = (touches, span)
         if best:
-            if kind == 'res': out.append(('tl_res', 'bull', f'اختراق ترند مقاومة اتحترم {best[0]} مرات على مدى {best[1]} شمعة · تأكد بـ {N} إغلاقات فوقه'))
-            else: out.append(('tl_sup', 'bear', f'كسر ترند دعم اتحترم {best[0]} مرات على مدى {best[1]} شمعة · تأكد بـ {N} إغلاقات تحته'))
+            if kind == 'res': out.append(('tl_res', 'bull', f'اختراق ترند مقاومة||اتحترم {best[0]} مرات على مدى {best[1]} شمعة · تأكيد بـ{N} إغلاقات فوقه'))
+            else: out.append(('tl_sup', 'bear', f'كسر ترند دعم||اتحترم {best[0]} مرات على مدى {best[1]} شمعة · تأكيد بـ{N} إغلاقات تحته'))
     return out
 
+def sq_at(x, j):
+    w = [v for v in x['bbw'][j-120:j+1] if v is not None]
+    return len(w) > 30 and x['bbw'][j] is not None and x['bbw'][j] <= sorted(w)[int(len(w)*.2)]
+def sig_bb(x, i):
+    if i < 140 or x['bbw'][i] is None: return []
+    c, o = x['c'], []
+    if sq_at(x, i) and not sq_at(x, i-1):
+        o.append(('bb_sq', 'neutral', f'ضغط التذبذب (بولنجر)||عرض النطاق {x["bbw"][i]:.1f}% من أضيق مستوياته في آخر 120 شمعة · احتمال حركة قوية قريبة'))
+    if any(sq_at(x, j) for j in range(i-10, i)):
+        if c[i] > x['bbU'][i] and c[i-1] <= x['bbU'][i-1]: o.append(('bb_up', 'bull', 'اختراق بولنجر لأعلى||إغلاق فوق النطاق العلوي بعد ضغط في التذبذب'))
+        if c[i] < x['bbL'][i] and c[i-1] >= x['bbL'][i-1]: o.append(('bb_dn', 'bear', 'كسر بولنجر لأسفل||إغلاق تحت النطاق السفلي بعد ضغط في التذبذب'))
+    return o
+def obv_div(x, j):
+    c, ob = x['c'], x['obv']
+    if j < 31: return None
+    cs, os_ = c[j-29:j+1], ob[j-29:j+1]; r = (max(os_)-min(os_)) or 1
+    if c[j] >= max(cs)*.995 and (max(os_)-ob[j])/r > .1: return 'bear'
+    if c[j] <= min(cs)*1.005 and (ob[j]-min(os_))/r > .1: return 'bull'
+    return None
+def sig_obv(x, i):
+    d = obv_div(x, i)
+    if d is None or obv_div(x, i-1) == d: return []
+    if d == 'bull': return [('obv_bull', 'bull', 'تباعد OBV إيجابي||السعر عند قاع آخر 30 شمعة والسيولة (OBV) أقوى منه')]
+    return [('obv_bear', 'bear', 'تباعد OBV سلبي||السعر عند قمة آخر 30 شمعة والسيولة (OBV) أضعف منها')]
+def sig_sr(x, i):
+    c, h, l, w, o = x['c'], x['h'], x['l'], CFG['pivot_window'], []
+    for kind, lst, y in (('up', x['ph'], h), ('dn', x['pl'], l)):
+        for p in [p for p in lst if i-200 <= p <= i-w-1][-8:]:
+            lvl = y[p]
+            cr = lambda j: (c[j] > lvl and c[j-1] <= lvl) if kind == 'up' else (c[j] < lvl and c[j-1] >= lvl)
+            if cr(i) and not any(cr(j) for j in range(p+3, i)):
+                t = ('sr_up', 'bull', f'اختراق مقاومة||السعر قفل فوق قمة {lvl:.6g} (اتكونت قبل {i-p} شمعة)') if kind == 'up' else ('sr_dn', 'bear', f'كسر دعم||السعر قفل تحت قاع {lvl:.6g} (اتكون قبل {i-p} شمعة)')
+                o.append(t); break
+    return o
 DETECT = [('golden_death', sig_ma), ('ema_9_21', sig_ema), ('ma200', sig_200), ('macd', sig_macd), ('macd', sig_rsima),
-          ('divergence', sig_div), ('patterns', sig_pat), ('flags', sig_flag), ('trendlines', sig_trend)]
-BREAKOUT = {'p_beng', 'p_seng', 'p_ham', 'p_star', 'p_morn', 'p_eve', 'flag_bull', 'flag_bear', 'tl_res', 'tl_sup'}
+          ('divergence', sig_div), ('patterns', sig_pat), ('flags', sig_flag), ('trendlines', sig_trend),
+          ('bollinger', sig_bb), ('obv', sig_obv), ('sr_breaks', sig_sr)]
+BREAKOUT = {'p_beng', 'p_seng', 'p_ham', 'p_star', 'p_morn', 'p_eve', 'flag_bull', 'flag_bear', 'tl_res', 'tl_sup', 'sr_up', 'sr_dn'}
 def confirm(x, i, sid, d):
     """تأكيد الاختراقات/النماذج: RSI فوق/تحت متوسطه 14 + حجم التداول (للفلاج والترند)"""
     ok, parts = True, []
     r, rm = x['rsi'][i], x['rsima'][i]
     if r is not None and rm is not None:
         ok &= (r > rm) if d == 'bull' else (r < rm); parts.append('RSI فوق متوسطه' if r > rm else 'RSI تحت متوسطه')
-    if sid.startswith(('flag', 'tl_')) and i >= 22:
+    if sid.startswith(('flag', 'tl_', 'sr_')) and i >= 22:
         a = sum(x['v'][i-21:i-1])/20
         if a > 0:
             ratio = max(x['v'][i], x['v'][i-1])/a; ok &= ratio >= CFG['breakout_vol_ratio']; parts.append(f'حجم ×{ratio:.1f}')
-    return ok, (' · ✅ مؤكد (' if ok else ' · ⚠️ غير مؤكد (') + ' · '.join(parts) + ')'
+    return ok, ('✅ مؤكد: ' if ok else '⚠️ غير مؤكد: ') + ' · '.join(parts)
 def detect(x, i, tf=None):
     out = []
     off = CFG['signals_off_tf'].get(tf, [])
@@ -278,40 +322,128 @@ def detect(x, i, tf=None):
         if sid in BREAKOUT and mode != 'off':
             ok, tag = confirm(x, i, sid, d)
             if not ok and mode == 'require': continue
-            txt += tag
+            txt += '||' + tag
         res.append((sid, d, txt))
     return res
 
 # ---------------- رسائل ----------------
 def fp(v): return f'{v:,.2f}' if v >= 100 else f'{v:,.4f}' if v >= 1 else f'{v:.6g}'
+RL = '\u200f'   # علامة اتجاه يمين-لشمال في أول كل سطر عشان العربي والإنجليزي ما يتلخبطوش
+ICON = {'bull': '🟢', 'bear': '🔴', 'neutral': '🔸'}
+TOK = re.compile(r'([A-Za-z][A-Za-z0-9]*(?: \d+)?|[+\-−]?\d[\d.,]*[%×]?)')
+def fmtd(t): return TOK.sub(lambda m: f'<code>{m.group(1)}</code>', html.escape(t, quote=False))
+def big(n): return f'{n/1e9:.2f}B' if n >= 1e9 else f'{n/1e6:.1f}M' if n >= 1e6 else f'{n/1e3:.0f}K' if n >= 1e3 else f'{n:.0f}'
 def build(sym, tf, items, x):
     tz = ZoneInfo(CFG['tz']); n = len(x['c'])-1; c = x['c'][n]
     nb, ns = sum(1 for it in items if it[2] == 'bull'), sum(1 for it in items if it[2] == 'bear')
-    head = f'🔔 {sym} · فريم {TF_AR[tf]}\n'
-    if nb and ns: head += f'🟢 {nb} صعود · 🔴 {ns} نزول (إشارات متعارضة)\n'
-    elif nb > 1 or ns > 1: head += f'{"🟢" if nb else "🔴"} تلاقي {max(nb, ns)} إشارات في نفس الاتجاه\n'
-    lines = []
+    L = [f'{RL}🔔 <b>{html.escape(sym[:-4])}</b> / USDT  ·  ⏱ <b>{TF_AR[tf]}</b>']
+    if nb and ns: L.append(f'{RL}⚖️ إشارات متعارضة: {nb} صعود · {ns} نزول')
+    elif max(nb, ns) > 1: L.append(f'{RL}{"🟢" if nb else "🔴"} <b>تلاقي {max(nb, ns)} إشارات</b> في نفس الاتجاه')
+    L.append(f'{RL}━━━━━━━━━━━━━━')
+    ht = CFG['htf_filter'].get(tf); tr = HTF.get((sym, ht)) if ht else None
     for key, i, d, txt in sorted(items, key=lambda z: z[1]):
-        t = datetime.fromtimestamp((x['t'][i]+TF_MS[tf])/1000, tz).strftime('%d/%m %H:%M')
-        ht = CFG['htf_filter'].get(tf); tr = HTF.get((sym, ht)) if ht else None; tag = ''
-        if ht and tr is not None and CFG['htf_mode'] == 'tag':
-            tag = f' · ✅ فريم {TF_AR[ht]} معاها' if tr != 0 and (d == 'bull') == (tr > 0) else (f' · ⚠️ فريم {TF_AR[ht]} عكسها' if tr != 0 else f' · ⚠️ فريم {TF_AR[ht]} متضارب')
-        lines.append(f'{"🟢" if d == "bull" else "🔴"} [{t}] {txt}{tag}')
-    r, rm, s2, a = x['rsi'][n], x['rsima'][n], x['m200'][n], x['atr'][n]
-    ctx = f'السعر {fp(c)}'
-    if r is not None and rm is not None: ctx += f' · RSI {r:.1f} ({"فوق" if r > rm else "تحت"} متوسطه {rm:.1f})'
-    if s2: ctx += f' · السعر {"فوق" if c > s2 else "تحت"} {MT}200'
-    if x['adx'][n] is not None: ctx += f' · ADX {x["adx"][n]:.0f}'
-    ht = CFG['htf_filter'].get(tf)
-    if ht and HTF.get((sym, ht)) is not None: ctx += f' · اتجاه {TF_AR[ht]}: ' + {1: 'صاعد', -1: 'هابط', 0: 'متضارب'}[HTF[(sym, ht)]]
-    if a: ctx += f' · ATR {a/c*100:.2f}%'
-    return head + '\n'.join(lines) + '\n━━━━\n' + ctx + '\nإشارة آلية للمراجعة، مش توصية.'
+        title, det, tag = (txt.split('||')+['', ''])[:3]
+        t = datetime.fromtimestamp((x['t'][i]+TF_MS[tf])/1000, tz).strftime('%H:%M · %d/%m')
+        L.append(f'{RL}{ICON[d]} <b>{html.escape(title, quote=False)}</b>')
+        if det: L.append(f'{RL}   ↳ {fmtd(det)}')
+        L.append(f'{RL}   🕒 <code>{t}</code>')
+        if tag: L.append(f'{RL}   {fmtd(tag)}')
+        if ht and tr is not None and CFG['htf_mode'] == 'tag' and d != 'neutral':
+            ok = tr != 0 and (d == 'bull') == (tr > 0)
+            L.append(f'{RL}   ' + (f'✅ فريم {TF_AR[ht]} معاها' if ok else f'⚠️ فريم {TF_AR[ht]} ' + ('عكسها' if tr != 0 else 'متضارب')))
+        L.append(RL)
+    L.append(f'{RL}━━━━━━━━━━━━━━')
+    r, rm, s2, a, ad = x['rsi'][n], x['rsima'][n], x['m200'][n], x['atr'][n], x['adx'][n]
+    L.append(f'{RL}💰 السعر: <code>{fp(c)}</code>')
+    if r is not None and rm is not None: L.append(f'{RL}📊 RSI: <code>{r:.1f}</code> — {"فوق" if r > rm else "تحت"} متوسطه <code>{rm:.1f}</code>')
+    if ad is not None: L.append(f'{RL}📈 قوة الاتجاه (ADX): <code>{ad:.0f}</code> — ' + ('قوي' if ad >= 25 else 'عرضي ضعيف' if ad < 20 else 'متوسط'))
+    if a: L.append(f'{RL}📐 ATR: متوسط حركة الشمعة <code>{a/c*100:.2f}%</code>')
+    if s2: L.append(f'{RL}🧭 السعر {"فوق" if c > s2 else "تحت"} <code>{MT} 200</code>' + (f' · اتجاه فريم {TF_AR[ht]}: ' + {1: "صاعد", -1: "هابط", 0: "متضارب"}[tr] if tr is not None else ''))
+    bw = x['bbw'][n]
+    if bw is not None:
+        pb = (c-x['bbL'][n])/((x['bbU'][n]-x['bbL'][n]) or 1)*100
+        L.append(f'{RL}🎯 بولنجر: التذبذب <code>{bw:.1f}%</code>' + (' 🔸 ضغط، احتمال حركة قوية' if sq_at(x, n) else '') + f' · موقع السعر <code>{pb:.0f}%</code> من النطاق')
+    v, ob = x['v'], x['obv']; av = sum(v[-21:-1])/20
+    L.append(f'{RL}📦 الحجم <code>×{(v[-1]/av if av else 0):.1f}</code> من المتوسط · OBV {"فوق" if ob[-1] > ema(ob, 20)[-1] else "تحت"} متوسطه')
+    H30, L30 = max(x['h'][-30:]), min(x['l'][-30:]); P = (H30+L30+c)/3; R1, S1 = 2*P-L30, 2*P-H30
+    L.append(f'{RL}📍 مقاومة <code>{fp(R1)}</code> ↑<code>{abs(R1/c-1)*100:.1f}%</code> · دعم <code>{fp(S1)}</code> ↓<code>{abs(S1/c-1)*100:.1f}%</code>')
+    L.append('{{CTX}}')
+    L.append(f'{RL}ℹ️ إشارة آلية للمراجعة وليست توصية')
+    return '\n'.join(L)
+
+# ---------------- سياق السوق: دفتر الأوامر (سبوت) + العقود + تصفية تقديرية ----------------
+FU = 'https://fapi.binance.com'; CTX = {}
+def jget(urls):
+    for u in urls:
+        try:
+            r = requests.get(u, timeout=15)
+            if r.status_code == 200: return r.json()
+        except Exception: pass
+    return None
+def liq_model(rows, p, ratio, span=.2, nb=40):
+    LEV = ((5, .10), (10, .25), (25, .30), (50, .20), (100, .15)); MM = .005; n = len(rows)
+    sh = ratio/(1+ratio) if ratio > 0 else .5
+    H, L = [float(r[2]) for r in rows], [float(r[3]) for r in rows]
+    smin, smax = [float('inf')]*(n+1), [-float('inf')]*(n+1)
+    for j in range(n-1, -1, -1): smin[j] = min(L[j], smin[j+1]); smax[j] = max(H[j], smax[j+1])
+    dn, up, step = [0.0]*nb, [0.0]*nb, span/nb*p
+    for j, r in enumerate(rows):
+        e = (float(r[2])+float(r[3])+float(r[4]))/3; w = float(r[7])*0.5**((n-1-j)/240)
+        for lv, wt in LEV:
+            ll, sl = e*(1-1/lv+MM), e*(1+1/lv-MM)
+            if ll < p and smin[j+1] > ll:
+                b = int((p-ll)//step)
+                if b < nb: dn[b] += w*wt*sh
+            if sl > p and smax[j+1] < sl:
+                b = int((sl-p)//step)
+                if b < nb: up[b] += w*wt*(1-sh)
+    return dn, up, step
+def context(sym):
+    if sym in CTX: return CTX[sym]
+    d = {}
+    dep = jget([f'{h}/api/v3/depth?symbol={sym}&limit=1000' for h in HOSTS])
+    if dep and dep.get('bids') and dep.get('asks'):
+        B = [(float(p), float(p)*float(q)) for p, q in dep['bids']]; A = [(float(p), float(p)*float(q)) for p, q in dep['asks']]
+        mid = (B[0][0]+A[0][0])/2
+        bb, aa = [x for x in B if x[0] >= mid*.95], [x for x in A if x[0] <= mid*1.05]
+        d['ob'] = (sum(u for p, u in B if p >= mid*.98), sum(u for p, u in A if p <= mid*1.02))
+        if bb and aa: d['wb'], d['wa'], d['mid'] = max(bb, key=lambda z: z[1]), max(aa, key=lambda z: z[1]), mid
+    prem = jget([f'{FU}/fapi/v1/premiumIndex?symbol={sym}'])
+    if prem and 'lastFundingRate' in prem: d['fr'] = float(prem['lastFundingRate'])*100
+    gl = jget([f'{FU}/futures/data/globalLongShortAccountRatio?symbol={sym}&period=1h&limit=1'])
+    if gl: d['ls'] = float(gl[0]['longShortRatio'])
+    fk = jget([f'{FU}/fapi/v1/klines?symbol={sym}&interval=1h&limit=500'])
+    if fk and len(fk) > 100:
+        p = float(fk[-1][4]); dn, up, step = liq_model(fk, p, d.get('ls', 1.0)); mx = max(dn+up) or 1
+        near = lambda arr: next(((i+.5)*step/p*100 for i, v in enumerate(arr) if v >= mx*.5), None)
+        td, tu = sum(dn[:10]), sum(up[:10]); d['liq'] = (near(dn), near(up), td/((td+tu) or 1), sum(dn[:5]), sum(up[:5]))
+    CTX[sym] = d; return d
+def ctx_lines(sym, tf):
+    if not CFG['market_context'] or tf not in CFG['context_tfs']: return ''
+    d = context(sym); L = []
+    if 'ob' in d:
+        b, a = d['ob']; im = (b-a)/((b+a) or 1)*100
+        L.append(f'{RL}💧 دفتر الأوامر (±2%): شراء <code>${big(b)}</code> مقابل بيع <code>${big(a)}</code> — ' + ('ضغط شراء أقوى' if im > 15 else 'ضغط بيع أقوى' if im < -15 else 'متوازن'))
+    if 'wb' in d:
+        (pb, ub), (pa, ua), mid = d['wb'], d['wa'], d['mid']
+        L.append(f'{RL}🧱 أكبر جدار شراء <code>${big(ub)}</code> عند <code>{fp(pb)}</code> · بيع <code>${big(ua)}</code> عند <code>{fp(pa)}</code>')
+    if 'fr' in d:
+        L.append(f'{RL}⚖️ التمويل (Funding): <code>{d["fr"]:.4f}%</code>' + (' — لونج مزدحم' if d['fr'] > .03 else ' — شورت مزدحم' if d['fr'] < -.01 else '') + (f' · لونج <code>{d["ls"]/(1+d["ls"])*100:.0f}%</code> من الحسابات' if 'ls' in d else ''))
+    if 'liq' in d:
+        nd, nu, sh, sd, su = d['liq']
+        side = 'تصفية اللونج (تحت السعر)' if sh >= .6 else 'تصفية الشورت (فوق السعر)' if sh <= .4 else 'متقاربة من الجهتين'
+        L.append(f'{RL}🎯 التصفية (تقدير): أقرب تجمع لونج ' + (f'<code>−{nd:.1f}%</code>' if nd else '—') + ' · شورت ' + (f'<code>+{nu:.1f}%</code>' if nu else '—') + f' · الأكبر: {side}')
+    return ('\n'.join(L)+'\n') if L else ''
 def send(text, dry):
-    if dry: print(text, '\n'); return True
+    if dry: print(re.sub(r'<[^>]+>', '', html.unescape(text)), '\n'); return True
     tok, chat = os.environ.get('TELEGRAM_TOKEN'), os.environ.get('TELEGRAM_CHAT_ID')
     if not tok or not chat: print('TELEGRAM_TOKEN / TELEGRAM_CHAT_ID ناقصين'); return False
     try:
-        r = requests.post(f'https://api.telegram.org/bot{tok}/sendMessage', json={'chat_id': chat, 'text': text}, timeout=20)
+        url = f'https://api.telegram.org/bot{tok}/sendMessage'
+        r = requests.post(url, json={'chat_id': chat, 'text': text, 'parse_mode': 'HTML', 'disable_web_page_preview': True}, timeout=20)
+        if r.status_code == 400:   # لو التنسيق فشل نبعت نص عادي
+            print('html failed, retry plain', r.text[:150])
+            r = requests.post(url, json={'chat_id': chat, 'text': re.sub(r'<[^>]+>', '', html.unescape(text))}, timeout=20)
         if r.status_code != 200: print('telegram error', r.status_code, r.text[:200])
         return r.status_code == 200
     except Exception as e:
@@ -401,9 +533,12 @@ def run(dry=False):
             st['done'][f'{sym}|{tf}'] = closed_open(tf); continue
         msgs.append((list(TF_MS).index(tf), sym, tf, build(sym, tf, items, x), items))
     msgs.sort(key=lambda m: -m[0]); cap = CFG['max_messages_per_run']
+    if CFG['market_context']:
+        want = sorted({m[1] for m in msgs[:cap] if m[2] in CFG['context_tfs']})
+        with ThreadPoolExecutor(CFG['workers']) as ex: list(ex.map(context, want))
     for k, (_, sym, tf, text, items) in enumerate(msgs):
         if k >= cap: break
-        if send(text, dry):
+        if send(text.replace('{{CTX}}', ctx_lines(sym, tf).rstrip('\n')), dry):
             for it in items: mark(st, it, now_ms, now)
             st['done'][f'{sym}|{tf}'] = closed_open(tf)
         if not dry: time.sleep(1.1)
@@ -411,6 +546,12 @@ def run(dry=False):
     if first and not dry: st['initialized'] = True; print('أول تشغيل: اتسجلت الإشارات الحالية بدون إرسال')
     if not dry: json.dump(st, open(STATE_PATH, 'w'), indent=1)
 
+def demo(dry):
+    sym = 'BTCUSDT'; x = klines(sym, '1h')
+    if not x: print('demo: تعذر جلب البيانات'); return
+    prep(x); n = len(x['c'])-1
+    items = [('demo', n, 'bull', 'رسالة تجريبية لعرض الشكل الجديد||دي مش إشارة حقيقية · الغرض شكل الرسالة بس||✅ مؤكد: RSI فوق متوسطه · حجم ×1.5')]
+    context(sym); send(build(sym, '1h', items, x).replace('{{CTX}}', ctx_lines(sym, '1h').rstrip('\n')), dry)
 if __name__ == '__main__':
-    if '--test' in sys.argv: send('✅ البوت شغال وبيبعت تنبيهات.', '--dry' in sys.argv)
+    if '--test' in sys.argv: send('✅ البوت شغال وبيبعت تنبيهات.', '--dry' in sys.argv); demo('--dry' in sys.argv)
     else: run('--dry' in sys.argv)

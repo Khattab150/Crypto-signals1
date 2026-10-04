@@ -27,7 +27,10 @@
     "divergence": true,
     "patterns": true,
     "flags": true,
-    "trendlines": true
+    "trendlines": true,
+    "bollinger": true,
+    "obv": true,
+    "sr_breaks": true
   },
   "signals_off_tf": {
     "15m": [
@@ -71,5 +74,11 @@
     "div_bull",
     "div_bear"
   ],
-  "htf_mode": "tag"
+  "htf_mode": "tag",
+  "market_context": true,
+  "context_tfs": [
+    "1h",
+    "4h",
+    "1d"
+  ]
 }
